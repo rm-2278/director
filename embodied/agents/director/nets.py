@@ -487,7 +487,8 @@ class Dense(tfutils.Module):
 class Norm(tfutils.Module, tf.keras.layers.Layer):
 
   def __init__(self, impl):
-    super().__init__()
+    tf.keras.layers.Layer.__init__(self)
+    tfutils.Module.__init__(self)
     self._impl = impl
 
   def build(self, input_shape):
