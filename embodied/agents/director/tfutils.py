@@ -243,9 +243,7 @@ class Optimizer(Module):
 
     # Apply gradients.
     if ~overflow:
-      self._opt.apply_gradients(
-          zip(grads, varibs),
-          experimental_aggregate_gradients=False)
+      self._opt.apply_gradients(zip(grads, varibs))
       self._updates.assign_add(1)
     metrics[f'{self._name}_grad_steps'] = self._updates
 
