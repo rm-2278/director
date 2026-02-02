@@ -484,11 +484,10 @@ class Dense(tfutils.Module):
     return x
 
 
-class Norm(tfutils.Module, tf.keras.layers.Layer):
+class Norm(tf.keras.layers.Layer):
 
-  def __init__(self, impl):
-    tf.keras.layers.Layer.__init__(self)
-    tfutils.Module.__init__(self)
+  def __init__(self, impl, **kwargs):
+    super().__init__(**kwargs)
     self._impl = impl
 
   def build(self, input_shape):
@@ -497,9 +496,9 @@ class Norm(tfutils.Module, tf.keras.layers.Layer):
       self.layer.build(input_shape)
     elif self._impl == 'layer':
       self.scale = self.add_weight(
-          'scale', input_shape[-1], tf.float32, 'Ones')
+          name='scale', shape=(input_shape[-1],), dtype=tf.float32, initializer='ones')
       self.offset = self.add_weight(
-          'offset', input_shape[-1], tf.float32, 'Zeros')
+          name='offset', shape=(input_shape[-1],), dtype=tf.float32, initializer='zeros')
 
   def call(self, x):
     if self._impl == 'none':
