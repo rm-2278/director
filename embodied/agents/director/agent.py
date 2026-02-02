@@ -176,6 +176,15 @@ class WorldModel(tfutils.Module):
     metrics.update({f'wmkl_{k}': v for k, v in mets.items()})
     for key, dist in dists.items():
       losses[key] = -dist.log_prob(data[key].astype(tf.float32))
+    if 'context_gate' in post:
+      gate = post['context_gate']
+      losses['context_gate'] = tf.reduce_mean(gate, -1)
+      metrics['context_gate_mean'] = gate.mean()
+      metrics['context_gate_std'] = gate.std()
+    if 'context' in post:
+      delta = tf.abs(post['context'][:, 1:] - post['context'][:, :-1])
+      metrics['context_change_rate'] = delta.mean()
+      metrics['context_change_max'] = delta.max()
     metrics.update({f'{k}_loss_mean': v.mean() for k, v in losses.items()})
     metrics.update({f'{k}_loss_std': v.std() for k, v in losses.items()})
     scaled = {}

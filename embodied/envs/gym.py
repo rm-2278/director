@@ -49,12 +49,19 @@ class Gym(embodied.Env):
     if action['reset'] or self._done:
       self._done = False
       obs = self._env.reset()
+      if isinstance(obs, tuple):
+        obs = obs[0]
       return self._obs(obs, 0.0, is_first=True)
     if self._act_dict:
       action = self._unflatten(action)
     else:
       action = action[self._act_key]
-    obs, reward, self._done, self._info = self._env.step(action)
+    result = self._env.step(action)
+    if len(result) == 5:
+      obs, reward, terminated, truncated, self._info = result
+      self._done = terminated or truncated
+    else:
+      obs, reward, self._done, self._info = result
     return self._obs(
         obs, reward,
         is_last=bool(self._done),

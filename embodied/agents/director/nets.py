@@ -15,7 +15,7 @@ class RSSM(tfutils.Module):
 
   def __init__(
       self, deter=1024, stoch=32, classes=32, unroll=True, initial='zeros',
-      **kw):
+      context=0, context_gate_bias=-2.0, **kw):
     super().__init__()
     self._deter = deter
     self._stoch = stoch
@@ -23,6 +23,8 @@ class RSSM(tfutils.Module):
     self._unroll = unroll
     self._initial = initial
     self._kw = kw
+    self._context = context
+    self._context_gate_bias = context_gate_bias
     self._cast = lambda x: tf.cast(x, prec.global_policy().compute_dtype)
 
   def initial(self, batch_size):
@@ -38,6 +40,9 @@ class RSSM(tfutils.Module):
           mean=tf.zeros([batch_size, self._stoch], dtype),
           std=tf.ones([batch_size, self._stoch], dtype),
           stoch=tf.zeros([batch_size, self._stoch], dtype))
+    if self._context:
+      state['context'] = tf.zeros([batch_size, self._context], dtype)
+      state['context_gate'] = tf.zeros([batch_size, self._context], dtype)
     if self._initial == 'zeros':
       return state
     elif self._initial == 'learned':
@@ -112,6 +117,9 @@ class RSSM(tfutils.Module):
     dist = self.get_dist(stats)
     stoch = self._cast(dist.sample())
     post = {'stoch': stoch, 'deter': prior['deter'], **stats}
+    if self._context:
+      post['context'] = prior['context']
+      post['context_gate'] = prior['context_gate']
     return post, prior
 
   def img_step(self, prev_state, prev_action):
@@ -131,6 +139,17 @@ class RSSM(tfutils.Module):
     dist = self.get_dist(stats)
     stoch = self._cast(dist.sample())
     prior = {'stoch': stoch, 'deter': deter, **stats}
+    if self._context:
+      prev_context = self._cast(prev_state['context'])
+      ctx_inputs = tf.concat([deter, prev_context], -1)
+      gate = self.get('context_gate', Dense, self._context, act='none')(
+        ctx_inputs)
+      gate = tf.nn.sigmoid(gate + self._context_gate_bias)
+      cand = self.get('context_cand', Dense, self._context, act='tanh')(
+        ctx_inputs)
+      context = gate * cand + (1 - gate) * prev_context
+      prior['context'] = context
+      prior['context_gate'] = gate
     return prior
 
   def get_stoch(self, deter):

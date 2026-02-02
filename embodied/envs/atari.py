@@ -27,9 +27,6 @@ class Atari(embodied.Env):
     # from PIL import Image
     # self._image = Image
 
-    import gym.envs.atari
-    if name == 'james_bond':
-      name = 'jamesbond'
     self._repeat = repeat
     self._size = size
     self._gray = gray
@@ -38,13 +35,20 @@ class Atari(embodied.Env):
     self._sticky = sticky
     self._length = length
     self._random = np.random.RandomState(seed)
-    with self.LOCK:
-      self._env = gym.envs.atari.AtariEnv(
-          game=name,
-          obs_type='image',  # TODO: Internal old version.
-          # obs_type='grayscale' if gray else 'rgb',
-          frameskip=1, repeat_action_probability=0.25 if sticky else 0.0,
-          full_action_space=(actions == 'all'))
+    
+    try:
+      import gym.envs.atari
+      with self.LOCK:
+        self._env = gym.envs.atari.AtariEnv(
+            game=name,
+            obs_type='image',
+            frameskip=1, repeat_action_probability=0.25 if sticky else 0.0,
+            full_action_space=(actions == 'all'))
+    except (ImportError, AttributeError):
+      import ale_py
+      import gym
+      with self.LOCK:
+        self._env = gym.make(f'ALE/{name}-v5', frameskip=1, repeat_action_probability=0.25 if sticky else 0.0, full_action_space=(actions == 'all'))
     assert self._env.unwrapped.get_action_meanings()[0] == 'NOOP'
     if gray:
       shape = self._env.observation_space.shape[:2]
@@ -86,7 +90,12 @@ class Atari(embodied.Env):
     total = 0.0
     dead = False
     for repeat in range(self._repeat):
-      _, reward, over, info = self._env.step(action['action'])
+      result = self._env.step(action['action'])
+      if len(result) == 5:
+        _, reward, terminated, truncated, info = result
+        over = terminated or truncated
+      else:
+        _, reward, over, info = result
       self._step += 1
       total += reward
       if repeat == self._repeat - 2:
@@ -106,12 +115,19 @@ class Atari(embodied.Env):
     return self._obs(total, is_last=self._done, is_terminal=dead or over)
 
   def _reset(self):
-    self._env.reset()
+    obs = self._env.reset()
+    if isinstance(obs, tuple):
+      obs = obs[0]
     if self._noops:
       for _ in range(self._random.randint(1, self._noops + 1)):
-         _, _, dead, _ = self._env.step(0)
+         result = self._env.step(0)
+         if len(result) == 5:
+           _, _, terminated, truncated, _ = result
+           dead = terminated or truncated
+         else:
+           _, _, dead, _ = result
          if dead:
-           self._env.reset()
+           self._reset()
     self._last_lives = self._ale.lives()
     self._screen(self._buffer[0])
     self._buffer[1].fill(0)
