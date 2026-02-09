@@ -50,10 +50,12 @@ class RSSM(tfutils.Module):
       # training graph, but this only happens once at the beginning of the
       # training loop. Afterwards, the state is reset inside the obs_step().
       state['deter'] = tf.repeat(self._cast(self.get(
-          'initial_deter', tf.Variable, state['deter'][0],
+          'initial_deter', tf.Variable,
+          tf.cast(state['deter'][0], tf.float32),
           trainable=True))[None], batch_size, 0)
       state['stoch'] = tf.repeat(self._cast(self.get(
-          'initial_stoch', tf.Variable, state['stoch'][0],
+          'initial_stoch', tf.Variable,
+          tf.cast(state['stoch'][0], tf.float32),
           trainable=True))[None], batch_size, 0)
       return state
     elif self._initial == 'learned2':
@@ -61,7 +63,8 @@ class RSSM(tfutils.Module):
       # training graph, but this only happens once at the beginning of the
       # training loop. Afterwards, the state is reset inside the obs_step().
       state['deter'] = tf.repeat(self._cast(tf.math.tanh(self.get(
-          'initial_deter', tf.Variable, state['deter'][0],
+          'initial_deter', tf.Variable,
+          tf.cast(state['deter'][0], tf.float32),
           trainable=True)))[None], batch_size, 0)
       state['stoch'] = self.get_stoch(state['deter'])
       return state
@@ -555,6 +558,9 @@ def get_act(name):
 
 class SimpleGateL0RDCell(tfutils.Module):
 
+  # Custom kwargs from the Dense layer API that should not be passed to tfkl.Dense.
+  _FILTERED_KWARGS = {'units', 'act', 'norm', 'bias'}
+
   def __init__(
       self, size, act='tanh', sample_sd=0.05, out_size=-1, always_sample=False,
       headless=False, **kwargs):
@@ -565,7 +571,10 @@ class SimpleGateL0RDCell(tfutils.Module):
     self._always_sample = always_sample
     self._headless = headless
     self._sample_sd = sample_sd
-    self._kwargs = kwargs
+    # Filter out kwargs that are not valid for tfkl.Dense
+    self._kwargs = {
+        k: v for k, v in kwargs.items()
+        if k not in self._FILTERED_KWARGS}
 
   @property
   def state_size(self):
@@ -575,11 +584,10 @@ class SimpleGateL0RDCell(tfutils.Module):
     return tf.zeros([batch_size, self._size], prec.global_policy().compute_dtype)
 
   def __call__(self, inputs, state, sample=False):
-    # state = state[0]  # Keras wraps the state in a list.
     overall_inp = tf.concat([inputs, state], -1)
 
     # candidate hidden state
-    kw = {k: v for k, v in self._kwargs.items() if k != 'units'}
+    kw = self._kwargs
     cand = self.get('r_layer', tfkl.Dense, self._size, use_bias=True, **kw)(overall_inp)
     cand = self._act(cand)
     update = self.get('g_layer', tfkl.Dense, self._size, use_bias=True, **kw)(overall_inp)
@@ -595,8 +603,9 @@ class SimpleGateL0RDCell(tfutils.Module):
     next_state = update_gate * cand + (1 - update_gate) * state
 
     # binarized gate activation with straight-through estimator
-    prec_update_gate = tf.cast(update_gate, tf.float32)  # always high precision for exact gate regularization
-    gates = tf.stop_gradient(tf.math.ceil(prec_update_gate)) + (prec_update_gate - tf.stop_gradient(prec_update_gate))
+    prec_update_gate = tf.cast(update_gate, tf.float32)
+    gates = tf.stop_gradient(tf.math.ceil(prec_update_gate)) + (
+        prec_update_gate - tf.stop_gradient(prec_update_gate))
 
     if self._headless:
       output = next_state
@@ -633,12 +642,9 @@ class ContextRSSM(tfutils.Module):
         out_size=ctxt_rnn_out_size,
         always_sample=ctxt_always_sample,
         headless=True,
-        **kw
       )
     else:
       raise NotImplementedError(ctxt_rnn_type)
-
-    self._ctxt_head = MLP(self._deter, layers=3, units=self._units, name='contextout')
 
   def initial(self, batch_size):
     dtype = prec.global_policy().compute_dtype
@@ -648,7 +654,7 @@ class ContextRSSM(tfutils.Module):
           logit=tf.zeros([batch_size, self._stoch, self._classes], dtype),
           stoch=tf.zeros([batch_size, self._stoch, self._classes], dtype),
           context=self._ctxt_rnn.initial(batch_size),
-          gates=tf.zeros([batch_size, 1], dtype),
+          gates=tf.zeros([batch_size, self._context], dtype),
           ctxt_logit=tf.zeros([batch_size, self._stoch, self._classes], dtype),
           ctxt_stoch=tf.zeros([batch_size, self._stoch, self._classes], dtype))
     else:
@@ -658,7 +664,7 @@ class ContextRSSM(tfutils.Module):
           std=tf.ones([batch_size, self._stoch], dtype),
           stoch=tf.zeros([batch_size, self._stoch], dtype),
           context=self._ctxt_rnn.initial(batch_size),
-          gates=tf.zeros([batch_size, 1], dtype),
+          gates=tf.zeros([batch_size, self._context], dtype),
           ctxt_mean=tf.zeros([batch_size, self._stoch], dtype),
           ctxt_std=tf.ones([batch_size, self._stoch], dtype),
           ctxt_stoch=tf.zeros([batch_size, self._stoch], dtype))
@@ -667,12 +673,12 @@ class ContextRSSM(tfutils.Module):
       return state
     elif self._initial == 'learned2':
       state['deter'] = tf.repeat(self._cast(tf.math.tanh(self.get(
-          'initial_deter', tf.Variable, state['deter'][0],
+          'initial_deter', tf.Variable,
+          tf.cast(state['deter'][0], tf.float32),
           trainable=True)))[None], batch_size, 0)
       state['stoch'] = self.get_stoch(state['deter'])
       return state
     else:
-      # Partial implementation for now
       return state
 
   def observe(self, embed, action, is_first, state=None, training=False):
@@ -719,29 +725,28 @@ class ContextRSSM(tfutils.Module):
   def obs_step(self, prev_state, prev_action, embed, is_first):
     prev_state, prev_action, is_first = tf.nest.map_structure(
         self._cast, (prev_state, prev_action, is_first))
-    
-    # Masking logic
-    prev_state, prev_action = tf.nest.map_structure(
-        self._cast, (prev_state, prev_action))
     prev_state, prev_action = tf.nest.map_structure(
         lambda x: tf.einsum('b...,b->b...', x, 1.0 - is_first),
         (prev_state, prev_action))
-        
-    # Reset state logic
     prev_state = tf.nest.map_structure(
         lambda x, y: x + tf.einsum('b...,b->b...', self._cast(y), is_first),
         prev_state, self.initial(len(is_first)))
 
     prior = self.img_step(prev_state, prev_action)
-    
+
     x = tf.concat([prior['context'], prior['deter'], embed], -1)
     x = self.get('obs_out', Dense, self._units, **self._kw)(x)
     stats = self._stats_layer('obs_stats', x)
     dist = self.get_dist(stats)
     stoch = self._cast(dist.sample())
-    
-    ctxt_stats = {f'ctxt_{k}': v for k, v in stats.items()}
-    ctxt_stats['ctxt_stoch'] = stoch # Simplified for now
+
+    # Context-conditioned posterior prediction
+    ctxt_x = tf.concat([prior['context'], prior['deter'], embed], -1)
+    ctxt_x = self.get('ctxt_obs_out', Dense, self._units, **self._kw)(ctxt_x)
+    ctxt_stats = self._stats_layer('ctxt_obs_stats', ctxt_x)
+    ctxt_stats = {f'ctxt_{k}': v for k, v in ctxt_stats.items()}
+    ctxt_stats['ctxt_stoch'] = self._cast(
+        self.get_dist(ctxt_stats, prefix='ctxt_').sample())
 
     post = {'stoch': stoch, 'deter': prior['deter'], 'context': prior['context'],
             'gates': prior['gates'], **stats, **ctxt_stats}
@@ -750,36 +755,34 @@ class ContextRSSM(tfutils.Module):
   def img_step(self, prev_state, prev_action):
     prev_stoch = self._cast(prev_state['stoch'])
     prev_action = self._cast(prev_action)
-    
+
     if self._classes:
       shape = prev_stoch.shape[:-2] + [self._stoch * self._classes]
       prev_stoch = tf.reshape(prev_stoch, shape)
-      
+
     x = tf.concat([prev_stoch, prev_action], -1)
     x = self.get('img_in', Dense, self._units, **self._kw)(x)
-    
+
     # Context RNN step
-    # Correct usage: inputs, state
-    # Ensure prev_state['context'] is passed correctly
-    _, context, gates = self._ctxt_rnn(x, prev_state['context']) 
-    
+    _, context, gates = self._ctxt_rnn(x, prev_state['context'])
+
     x = tf.concat([x, context], -1)
     x, deter = self._gru(x, prev_state['deter'])
-    
+
     x = self.get('img_out', Dense, self._units, **self._kw)(x)
     stats = self._stats_layer('img_stats', x)
     dist = self.get_dist(stats)
     stoch = self._cast(dist.sample())
-    
-    # Context prediction (Simplified)
-    ctxt_dict = {'stoch': stoch, 'context': context, 'prev_stoch': prev_stoch, 'prev_action': prev_action}
-    # ctxt_out = self._get_coarse_out_internal(ctxt_dict)
-    
-    # Add ctxt stats to prior to match post structure
-    ctxt_stats = {f'ctxt_{k}': v for k, v in stats.items()}
-    ctxt_stats['ctxt_stoch'] = stoch
-    
-    prior = {'stoch': stoch, 'deter': deter, 'context': context, 'gates': gates, 
+
+    # Context-conditioned prior prediction
+    ctxt_x = self.get('ctxt_img_out', Dense, self._units, **self._kw)(
+        tf.concat([context, deter], -1))
+    ctxt_stats = self._stats_layer('ctxt_img_stats', ctxt_x)
+    ctxt_stats = {f'ctxt_{k}': v for k, v in ctxt_stats.items()}
+    ctxt_stats['ctxt_stoch'] = self._cast(
+        self.get_dist(ctxt_stats, prefix='ctxt_').sample())
+
+    prior = {'stoch': stoch, 'deter': deter, 'context': context, 'gates': gates,
              **stats, **ctxt_stats}
     return prior
 
@@ -811,9 +814,17 @@ class ContextRSSM(tfutils.Module):
     dist = self.get_dist(stats)
     return self._cast(dist.mode())
 
+  def _balanced_kl(self, post, prior, post_const, prior_const, balance, prefix=''):
+    lhs = tfd.kl_divergence(
+        self.get_dist(post_const, prefix), self.get_dist(prior, prefix))
+    rhs = tfd.kl_divergence(
+        self.get_dist(post, prefix), self.get_dist(prior_const, prefix))
+    return balance * lhs + (1 - balance) * rhs
+
   def kl_loss(self, post, prior, balance=0.8):
     post_const = tf.nest.map_structure(tf.stop_gradient, post)
     prior_const = tf.nest.map_structure(tf.stop_gradient, prior)
-    lhs = tfd.kl_divergence(self.get_dist(post_const), self.get_dist(prior))
-    rhs = tfd.kl_divergence(self.get_dist(post), self.get_dist(prior_const))
-    return balance * lhs + (1 - balance) * rhs
+    kl = self._balanced_kl(post, prior, post_const, prior_const, balance)
+    ctxt_kl = self._balanced_kl(
+        post, prior, post_const, prior_const, balance, prefix='ctxt_')
+    return kl + ctxt_kl
