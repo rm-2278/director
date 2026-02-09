@@ -50,7 +50,7 @@ defaults:
 
   # World Model
   grad_heads: [decoder, reward, cont]
-  rssm: {deter: 1024, stoch: 32, classes: 32, units: 1024, act: elu, norm: layer, initial: learned2, unroll: True}
+  rssm: {deter: 1024, stoch: 32, classes: 32, units: 1024, act: elu, norm: layer, initial: learned2, unroll: True, context: 0}
   encoder: {mlp_keys: '.*', cnn_keys: '.*', act: elu, norm: layer, mlp_layers: 4, mlp_units: 512, cnn: simple, cnn_depth: 64, cnn_kernels: [4, 4, 4, 4]}
   decoder: {mlp_keys: '.*', cnn_keys: '.*', act: elu, norm: layer, mlp_layers: 4, mlp_units: 512, cnn: simple, cnn_depth: 64, cnn_kernels: [5, 5, 6, 6], image_dist: mse, inputs: [deter, stoch]}
   reward_head: {layers: 4, units: 512, act: elu, norm: layer, dist: symlog, outscale: 0.1, inputs: [deter, stoch]}

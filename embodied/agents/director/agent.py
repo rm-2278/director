@@ -141,7 +141,7 @@ class WorldModel(tfutils.Module):
     shapes = {k: v for k, v in shapes.items() if not k.startswith('log_')}
     self.config = config
     if config.rssm_type == 'context':
-      self.rssm = nets.ContextRSSM(**config.rssm, **config.rssm_context)
+      self.rssm = nets.ContextRSSM(**{**config.rssm, **config.rssm_context})
     else:
       self.rssm = nets.RSSM(**config.rssm)
     self.encoder = nets.MultiEncoder(shapes, **config.encoder)

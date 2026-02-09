@@ -632,7 +632,7 @@ class ContextRSSM(tfutils.Module):
     self._initial = initial
     self._context = int(context)
     self._units = int(kw.pop('units', 1024))
-    self._kw = kw
+    self._kw = {**kw, 'act': act, 'norm': norm}
     self._cast = lambda x: tf.cast(x, prec.global_policy().compute_dtype)
 
     if ctxt_rnn_type == 'SimpleGateL0RD':
