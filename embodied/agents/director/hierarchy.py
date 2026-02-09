@@ -82,15 +82,15 @@ class Hierarchy(tfutils.Module):
     sg = lambda x: tf.nest.map_structure(tf.stop_gradient, x)
     update = (carry['step'] % duration) == 0
     switch = lambda x, y: (
-        tf.einsum('i,i...->i...', 1 - update.astype(x.dtype), x) +
-        tf.einsum('i,i...->i...', update.astype(x.dtype), y))
+        tf.einsum('i,i...->i...', 1 - tf.cast(update, x.dtype), x) +
+        tf.einsum('i,i...->i...', tf.cast(update, x.dtype), y))
     skill = sg(switch(carry['skill'], self.manager.actor(sg(latent)).sample()))
     new_goal = self.dec({'skill': skill, 'context': self.feat(latent)}).mode()
     new_goal = (
-        self.feat(latent).astype(tf.float32) + new_goal
+        tf.cast(self.feat(latent), tf.float32) + new_goal
         if self.config.manager_delta else new_goal)
     goal = sg(switch(carry['goal'], new_goal))
-    delta = goal - self.feat(latent).astype(tf.float32)
+    delta = goal - tf.cast(self.feat(latent), tf.float32)
     dist = self.worker.actor(sg({**latent, 'goal': goal, 'delta': delta}))
     outs = {'action': dist}
     if 'image' in self.wm.heads['decoder'].shapes:
@@ -101,7 +101,7 @@ class Hierarchy(tfutils.Module):
     return outs, carry
 
   def train(self, imagine, start, data):
-    success = lambda rew: (rew[-1] > 0.7).astype(tf.float32).mean()
+    success = lambda rew: tf.cast(rew[-1] > 0.7, tf.float32).mean()
     metrics = {}
     if self.config.expl_rew == 'disag':
       metrics.update(self.expl_reward.train(data))
@@ -152,7 +152,7 @@ class Hierarchy(tfutils.Module):
       traj['reward_extr'] = self.extr_reward(traj)
       traj['reward_expl'] = self.expl_reward(traj)
       traj['reward_goal'] = self.goal_reward(traj)
-      traj['delta'] = traj['goal'] - self.feat(traj).astype(tf.float32)
+      traj['delta'] = traj['goal'] - tf.cast(self.feat(traj), tf.float32)
       wtraj = self.split_traj(traj)
       mtraj = self.abstract_traj(traj)
     mets = self.worker.update(wtraj, tape)
@@ -170,7 +170,7 @@ class Hierarchy(tfutils.Module):
       skill = self.manager.actor(sg(start)).sample()
       goal = self.dec({'skill': skill, 'context': context}).mode()
       goal = (
-          self.feat(start).astype(tf.float32) + goal
+          tf.cast(self.feat(start), tf.float32) + goal
           if self.config.manager_delta else goal)
       worker = lambda s: self.worker.actor(sg({
           **s, 'goal': goal, 'delta': goal - self.feat(s)})).sample()
@@ -180,7 +180,7 @@ class Hierarchy(tfutils.Module):
       traj['reward_extr'] = self.extr_reward(traj)
       traj['reward_expl'] = self.expl_reward(traj)
       traj['reward_goal'] = self.goal_reward(traj)
-      traj['delta'] = traj['goal'] - self.feat(traj).astype(tf.float32)
+      traj['delta'] = traj['goal'] - tf.cast(self.feat(traj), tf.float32)
       wtraj = traj.copy()
       mtraj = self.abstract_traj_old(traj)
     mets = self.worker.update(wtraj, tape)
@@ -199,7 +199,7 @@ class Hierarchy(tfutils.Module):
       traj['reward_extr'] = self.extr_reward(traj)
       traj['reward_expl'] = self.expl_reward(traj)
       traj['reward_goal'] = self.goal_reward(traj)
-      traj['delta'] = traj['goal'] - self.feat(traj).astype(tf.float32)
+      traj['delta'] = traj['goal'] - tf.cast(self.feat(traj), tf.float32)
       mtraj = self.abstract_traj(traj)
     metrics = self.manager.update(mtraj, tape)
     metrics = {f'manager_{k}': v for k, v in metrics.items()}
@@ -211,21 +211,21 @@ class Hierarchy(tfutils.Module):
     sg = lambda x: tf.nest.map_structure(tf.stop_gradient, x)
     with tf.GradientTape(persistent=True) as tape:
       worker = lambda s: self.worker.actor(sg({
-          **s, 'goal': goal, 'delta': goal - self.feat(s).astype(tf.float32),
+          **s, 'goal': goal, 'delta': goal - tf.cast(self.feat(s), tf.float32),
       })).sample()
       traj = imagine(worker, start, self.config.imag_horizon)
       traj['goal'] = tf.repeat(goal[None], 1 + self.config.imag_horizon, 0)
       traj['reward_extr'] = self.extr_reward(traj)
       traj['reward_expl'] = self.expl_reward(traj)
       traj['reward_goal'] = self.goal_reward(traj)
-      traj['delta'] = traj['goal'] - self.feat(traj).astype(tf.float32)
+      traj['delta'] = traj['goal'] - tf.cast(self.feat(traj), tf.float32)
     mets = self.worker.update(traj, tape)
     metrics.update({f'worker_{k}': v for k, v in mets.items()})
     return traj, metrics
 
   def train_vae_replay(self, data):
     metrics = {}
-    feat = self.feat(data).astype(tf.float32)
+    feat = tf.cast(self.feat(data), tf.float32)
     if 'context' in self.config.goal_decoder.inputs:
       if self.config.vae_span:
         context = feat[:, 0]
@@ -255,7 +255,7 @@ class Hierarchy(tfutils.Module):
 
   def train_vae_imag(self, traj):
     metrics = {}
-    feat = self.feat(traj).astype(tf.float32)
+    feat = tf.cast(self.feat(traj), tf.float32)
     if 'context' in self.config.goal_decoder.inputs:
       if self.config.vae_span:
         context = feat[0]
@@ -269,7 +269,7 @@ class Hierarchy(tfutils.Module):
     with tf.GradientTape() as tape:
       enc = self.enc({'goal': goal, 'context': context})
       dec = self.dec({'skill': enc.sample(), 'context': context})
-      rec = -dec.log_prob(tf.stop_gradient(goal.astype(tf.float32)))
+      rec = -dec.log_prob(tf.stop_gradient(tf.cast(goal, tf.float32)))
       if self.config.goal_kl:
         kl = tfd.kl_divergence(enc, self.prior)
         kl, mets = self.kl(kl)
@@ -283,13 +283,13 @@ class Hierarchy(tfutils.Module):
     return metrics
 
   def propose_goal(self, start, impl):
-    feat = self.feat(start).astype(tf.float32)
+    feat = tf.cast(self.feat(start), tf.float32)
     if impl == 'replay':
-      target = tf.random.shuffle(feat).astype(tf.float32)
+      target = tf.cast(tf.random.shuffle(feat), tf.float32)
       skill = self.enc({'goal': target, 'context': feat}).sample()
       return self.dec({'skill': skill, 'context': feat}).mode()
     if impl == 'replay_direct':
-      return tf.random.shuffle(feat).astype(tf.float32)
+      return tf.cast(tf.random.shuffle(feat), tf.float32)
     if impl == 'manager':
       skill = self.manager.actor(start).sample()
       goal = self.dec({'skill': skill, 'context': feat}).mode()
@@ -301,9 +301,9 @@ class Hierarchy(tfutils.Module):
     raise NotImplementedError(impl)
 
   def goal_reward(self, traj):
-    feat = self.feat(traj).astype(tf.float32)
-    goal = tf.stop_gradient(traj['goal'].astype(tf.float32))
-    skill = tf.stop_gradient(traj['skill'].astype(tf.float32))
+    feat = tf.cast(self.feat(traj), tf.float32)
+    goal = tf.stop_gradient(tf.cast(traj['goal'], tf.float32))
+    skill = tf.stop_gradient(tf.cast(traj['skill'], tf.float32))
     context = tf.stop_gradient(
         tf.repeat(feat[0][None], 1 + self.config.imag_horizon, 0))
     if self.config.goal_reward == 'dot':
@@ -372,7 +372,7 @@ class Hierarchy(tfutils.Module):
     elif self.config.goal_reward == 'squared':
       return -((goal - feat) ** 2).sum(-1)[1:]
     elif self.config.goal_reward == 'epsilon':
-      return ((goal - feat).mean(-1) < 1e-3).astype(tf.float32)[1:]
+      return tf.cast((goal - feat).mean(-1) < 1e-3, tf.float32)[1:]
     elif self.config.goal_reward == 'enclogprob':
       return self.enc({'goal': goal, 'context': context}).log_prob(skill)[1:]
     elif self.config.goal_reward == 'encprob':
@@ -391,7 +391,7 @@ class Hierarchy(tfutils.Module):
       raise NotImplementedError(self.config.goal_reward)
 
   def elbo_reward(self, traj):
-    feat = self.feat(traj).astype(tf.float32)
+    feat = tf.cast(self.feat(traj), tf.float32)
     context = tf.repeat(feat[0][None], 1 + self.config.imag_horizon, 0)
     enc = self.enc({'goal': feat, 'context': context})
     dec = self.dec({'skill': enc.sample(), 'context': context})
@@ -475,7 +475,7 @@ class Hierarchy(tfutils.Module):
     goal = self.propose_goal(start, impl)
     # Worker rollout.
     worker = lambda s: self.worker.actor({
-        **s, 'goal': goal, 'delta': goal - self.feat(s).astype(tf.float32),
+        **s, 'goal': goal, 'delta': goal - tf.cast(self.feat(s), tf.float32),
     }).sample()
     traj = self.wm.imagine(
         worker, start, self.config.worker_report_horizon)

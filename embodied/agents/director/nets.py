@@ -15,14 +15,14 @@ class RSSM(tfutils.Module):
 
   def __init__(
       self, deter=1024, stoch=32, classes=32, unroll=True, initial='zeros',
-      context=0, context_gate_bias=-2.0, **kw):
+      context=0, context_gate_bias=-2.0, units=1024, **kw):
     super().__init__()
     self._deter = deter
     self._stoch = stoch
     self._classes = classes
     self._unroll = unroll
     self._initial = initial
-    self._kw = kw
+    self._kw = {**kw, 'units': units}
     self._context = context
     self._context_gate_bias = context_gate_bias
     self._cast = lambda x: tf.cast(x, prec.global_policy().compute_dtype)
@@ -50,10 +50,10 @@ class RSSM(tfutils.Module):
       # training graph, but this only happens once at the beginning of the
       # training loop. Afterwards, the state is reset inside the obs_step().
       state['deter'] = tf.repeat(self._cast(self.get(
-          'initial_deter', tf.Variable, state['deter'][0].astype(tf.float32),
+          'initial_deter', tf.Variable, state['deter'][0],
           trainable=True))[None], batch_size, 0)
       state['stoch'] = tf.repeat(self._cast(self.get(
-          'initial_stoch', tf.Variable, state['stoch'][0].astype(tf.float32),
+          'initial_stoch', tf.Variable, state['stoch'][0],
           trainable=True))[None], batch_size, 0)
       return state
     elif self._initial == 'learned2':
@@ -61,7 +61,7 @@ class RSSM(tfutils.Module):
       # training graph, but this only happens once at the beginning of the
       # training loop. Afterwards, the state is reset inside the obs_step().
       state['deter'] = tf.repeat(self._cast(tf.math.tanh(self.get(
-          'initial_deter', tf.Variable, state['deter'][0].astype(tf.float32),
+          'initial_deter', tf.Variable, state['deter'][0],
           trainable=True)))[None], batch_size, 0)
       state['stoch'] = self.get_stoch(state['deter'])
       return state
@@ -282,7 +282,7 @@ class MultiDecoder(tfutils.Module):
     return dists
 
   def _make_image_dist(self, name, mean):
-    mean = mean.astype(tf.float32)
+    mean = tf.cast(mean, tf.float32)
     if self._image_dist == 'normal':
       return tfd.Independent(tfd.Normal(mean, 1), 3)
     if self._image_dist == 'mse':
@@ -299,7 +299,7 @@ class ImageEncoderSimple(tfutils.Module):
 
   def __call__(self, features):
     Conv = functools.partial(Conv2D, stride=2, pad='valid')
-    x = features.astype(prec.global_policy().compute_dtype)
+    x = tf.cast(features, prec.global_policy().compute_dtype)
     depth = self._depth
     for i, kernel in enumerate(self._kernels):
       x = self.get(f'conv{i}', Conv, depth, kernel, **self._kw)(x)
@@ -389,11 +389,11 @@ class DistLayer(tfutils.Module):
     else:
       kw['kernel_initializer'] = tfki.VarianceScaling(
           self._outscale, 'fan_avg', 'uniform')
-    out = self.get('out', tfkl.Dense, np.prod(self._shape), **kw)(inputs)
+    out = self.get('out', tfkl.Dense, int(np.prod(self._shape)), **kw)(inputs)
     out = tf.reshape(out, tuple(inputs.shape[:-1]) + self._shape)
     out = tf.cast(out, tf.float32)
     if self._dist in ('normal', 'trunc_normal', 'dir'):
-      std = self.get('std', tfkl.Dense, np.prod(self._shape))(inputs)
+      std = self.get('std', tfkl.Dense, int(np.prod(self._shape)))(inputs)
       std = tf.reshape(std, tuple(inputs.shape[:-1]) + self._shape)
       std = tf.cast(std, tf.float32)
     if self._dist == 'symlog':
@@ -470,7 +470,7 @@ class Conv2D(tfutils.Module):
 class Dense(tfutils.Module):
 
   def __init__(self, units, act='none', norm='none', bias=True):
-    self._units = units
+    self._units = int(units)
     self._act = get_act(act)
     self._norm = norm
     self._bias = bias and norm == 'none'
@@ -533,7 +533,7 @@ class Input:
       if len(value.shape) > dims:
         values[i] = value.reshape(
             value.shape[:dims - 1] + [np.prod(value.shape[dims - 1:])])
-    values = [x.astype(inputs[self._dims].dtype) for x in values]
+    values = [tf.cast(x, inputs[self._dims].dtype) for x in values]
     return tf.concat(values, -1)
 
 
@@ -552,3 +552,268 @@ def get_act(name):
     return getattr(tf, name)
   else:
     raise NotImplementedError(name)
+
+class SimpleGateL0RDCell(tfutils.Module):
+
+  def __init__(
+      self, size, act='tanh', sample_sd=0.05, out_size=-1, always_sample=False,
+      headless=False, **kwargs):
+    super().__init__()
+    self._size = int(size)
+    self._act = get_act(act)
+    self._out_size = int(size) if out_size <= 0 else int(out_size)
+    self._always_sample = always_sample
+    self._headless = headless
+    self._sample_sd = sample_sd
+    self._kwargs = kwargs
+
+  @property
+  def state_size(self):
+    return self._size
+
+  def initial(self, batch_size):
+    return tf.zeros([batch_size, self._size], prec.global_policy().compute_dtype)
+
+  def __call__(self, inputs, state, sample=False):
+    # state = state[0]  # Keras wraps the state in a list.
+    overall_inp = tf.concat([inputs, state], -1)
+
+    # candidate hidden state
+    kw = {k: v for k, v in self._kwargs.items() if k != 'units'}
+    cand = self.get('r_layer', tfkl.Dense, self._size, use_bias=True, **kw)(overall_inp)
+    cand = self._act(cand)
+    update = self.get('g_layer', tfkl.Dense, self._size, use_bias=True, **kw)(overall_inp)
+    dtype = update.dtype
+
+    if sample or self._always_sample:
+      gate_noise = tf.random.normal(tf.shape(update), 0.0, self._sample_sd, dtype=dtype)
+      update_gate = tf.nn.relu(tf.math.tanh(update + gate_noise))
+    else:
+      update_gate = tf.nn.relu(tf.math.tanh(update))
+
+    # update latent state
+    next_state = update_gate * cand + (1 - update_gate) * state
+
+    # binarized gate activation with straight-through estimator
+    prec_update_gate = tf.cast(update_gate, tf.float32)  # always high precision for exact gate regularization
+    gates = tf.stop_gradient(tf.math.ceil(prec_update_gate)) + (prec_update_gate - tf.stop_gradient(prec_update_gate))
+
+    if self._headless:
+      output = next_state
+    else:
+      updated_overall = tf.concat([inputs, next_state], -1)
+      p_out = self.get('p_layer', tfkl.Dense, self._out_size, use_bias=True, **kw)(updated_overall)
+      o_out = self.get('o_layer', tfkl.Dense, self._out_size, use_bias=True, **kw)(updated_overall)
+      output = self._act(p_out) * tf.math.sigmoid(o_out)
+
+    return output, next_state, gates
+
+class ContextRSSM(tfutils.Module):
+
+  def __init__(
+      self, deter=1024, stoch=32, classes=32, unroll=True, initial='zeros',
+      context=16, ctxt_rnn_type='SimpleGateL0RD', ctxt_sample_noise=0.05,
+      ctxt_rnn_out_size=-1, ctxt_always_sample=False, act='elu', norm='none',
+      **kw):
+    super().__init__()
+    self._deter = int(deter)
+    self._stoch = int(stoch)
+    self._classes = int(classes)
+    self._unroll = unroll
+    self._initial = initial
+    self._context = int(context)
+    self._units = int(kw.pop('units', 1024))
+    self._kw = kw
+    self._cast = lambda x: tf.cast(x, prec.global_policy().compute_dtype)
+
+    if ctxt_rnn_type == 'SimpleGateL0RD':
+      self._ctxt_rnn = SimpleGateL0RDCell(
+        self._context,
+        sample_sd=ctxt_sample_noise,
+        out_size=ctxt_rnn_out_size,
+        always_sample=ctxt_always_sample,
+        headless=True,
+        **kw
+      )
+    else:
+      raise NotImplementedError(ctxt_rnn_type)
+
+    self._ctxt_head = MLP(self._deter, layers=3, units=self._units, name='contextout')
+
+  def initial(self, batch_size):
+    dtype = prec.global_policy().compute_dtype
+    if self._classes:
+      state = dict(
+          deter=tf.zeros([batch_size, self._deter], dtype),
+          logit=tf.zeros([batch_size, self._stoch, self._classes], dtype),
+          stoch=tf.zeros([batch_size, self._stoch, self._classes], dtype),
+          context=self._ctxt_rnn.initial(batch_size),
+          gates=tf.zeros([batch_size, 1], dtype),
+          ctxt_logit=tf.zeros([batch_size, self._stoch, self._classes], dtype),
+          ctxt_stoch=tf.zeros([batch_size, self._stoch, self._classes], dtype))
+    else:
+      state = dict(
+          deter=tf.zeros([batch_size, self._deter], dtype),
+          mean=tf.zeros([batch_size, self._stoch], dtype),
+          std=tf.ones([batch_size, self._stoch], dtype),
+          stoch=tf.zeros([batch_size, self._stoch], dtype),
+          context=self._ctxt_rnn.initial(batch_size),
+          gates=tf.zeros([batch_size, 1], dtype),
+          ctxt_mean=tf.zeros([batch_size, self._stoch], dtype),
+          ctxt_std=tf.ones([batch_size, self._stoch], dtype),
+          ctxt_stoch=tf.zeros([batch_size, self._stoch], dtype))
+
+    if self._initial == 'zeros':
+      return state
+    elif self._initial == 'learned2':
+      state['deter'] = tf.repeat(self._cast(tf.math.tanh(self.get(
+          'initial_deter', tf.Variable, state['deter'][0],
+          trainable=True)))[None], batch_size, 0)
+      state['stoch'] = self.get_stoch(state['deter'])
+      return state
+    else:
+      # Partial implementation for now
+      return state
+
+  def observe(self, embed, action, is_first, state=None, training=False):
+    swap = lambda x: tf.transpose(x, [1, 0] + list(range(2, len(x.shape))))
+    if state is None:
+      state = self.initial(action.shape[0])
+
+    step = lambda prev, inputs: self.obs_step(prev[0], *inputs)
+    inputs = swap(action), swap(embed), swap(is_first)
+    start = state, state
+    post, prior = tfutils.scan(step, inputs, start, self._unroll)
+    post = {k: swap(v) for k, v in post.items()}
+    prior = {k: swap(v) for k, v in prior.items()}
+    return post, prior
+
+  def imagine(self, action, state=None, training=False):
+    swap = lambda x: tf.transpose(x, [1, 0] + list(range(2, len(x.shape))))
+    if state is None:
+      state = self.initial(action.shape[0])
+    assert isinstance(state, dict), state
+    action = swap(action)
+    prior = tfutils.scan(self.img_step, action, state, self._unroll)
+    prior = {k: swap(v) for k, v in prior.items()}
+    return prior
+
+  def get_feat(self, state):
+    stoch = state['stoch']
+    if self._classes:
+      shape = list(stoch.shape[:-2]) + [self._stoch * self._classes]
+      stoch = tf.reshape(stoch, shape)
+    return tf.concat([state['deter'], stoch], -1)
+
+  def get_dist(self, state, prefix=''):
+    if self._classes:
+      logit = tf.cast(state[f'{prefix}logit'], tf.float32)
+      dist = tfd.Independent(tfutils.OneHotDist(logit), 1)
+    else:
+      mean, std = state[f'{prefix}mean'], state[f'{prefix}std']
+      mean = tf.cast(mean, tf.float32)
+      std = tf.cast(std, tf.float32)
+      dist = tfd.MultivariateNormalDiag(mean, std)
+    return dist
+
+  def obs_step(self, prev_state, prev_action, embed, is_first):
+    prev_state, prev_action, is_first = tf.nest.map_structure(
+        self._cast, (prev_state, prev_action, is_first))
+    
+    # Masking logic
+    prev_state, prev_action = tf.nest.map_structure(
+        self._cast, (prev_state, prev_action))
+    prev_state, prev_action = tf.nest.map_structure(
+        lambda x: tf.einsum('b...,b->b...', x, 1.0 - is_first),
+        (prev_state, prev_action))
+        
+    # Reset state logic
+    prev_state = tf.nest.map_structure(
+        lambda x, y: x + tf.einsum('b...,b->b...', self._cast(y), is_first),
+        prev_state, self.initial(len(is_first)))
+
+    prior = self.img_step(prev_state, prev_action)
+    
+    x = tf.concat([prior['context'], prior['deter'], embed], -1)
+    x = self.get('obs_out', Dense, self._units, **self._kw)(x)
+    stats = self._stats_layer('obs_stats', x)
+    dist = self.get_dist(stats)
+    stoch = self._cast(dist.sample())
+    
+    ctxt_stats = {f'ctxt_{k}': v for k, v in stats.items()}
+    ctxt_stats['ctxt_stoch'] = stoch # Simplified for now
+
+    post = {'stoch': stoch, 'deter': prior['deter'], 'context': prior['context'],
+            'gates': prior['gates'], **stats, **ctxt_stats}
+    return post, prior
+
+  def img_step(self, prev_state, prev_action):
+    prev_stoch = self._cast(prev_state['stoch'])
+    prev_action = self._cast(prev_action)
+    
+    if self._classes:
+      shape = prev_stoch.shape[:-2] + [self._stoch * self._classes]
+      prev_stoch = tf.reshape(prev_stoch, shape)
+      
+    x = tf.concat([prev_stoch, prev_action], -1)
+    x = self.get('img_in', Dense, self._units, **self._kw)(x)
+    
+    # Context RNN step
+    # Correct usage: inputs, state
+    # Ensure prev_state['context'] is passed correctly
+    _, context, gates = self._ctxt_rnn(x, prev_state['context']) 
+    
+    x = tf.concat([x, context], -1)
+    x, deter = self._gru(x, prev_state['deter'])
+    
+    x = self.get('img_out', Dense, self._units, **self._kw)(x)
+    stats = self._stats_layer('img_stats', x)
+    dist = self.get_dist(stats)
+    stoch = self._cast(dist.sample())
+    
+    # Context prediction (Simplified)
+    ctxt_dict = {'stoch': stoch, 'context': context, 'prev_stoch': prev_stoch, 'prev_action': prev_action}
+    # ctxt_out = self._get_coarse_out_internal(ctxt_dict)
+    
+    # Add ctxt stats to prior to match post structure
+    ctxt_stats = {f'ctxt_{k}': v for k, v in stats.items()}
+    ctxt_stats['ctxt_stoch'] = stoch
+    
+    prior = {'stoch': stoch, 'deter': deter, 'context': context, 'gates': gates, 
+             **stats, **ctxt_stats}
+    return prior
+
+  def _gru(self, x, deter):
+    x = tf.concat([deter, x], -1)
+    kw = {**self._kw, 'act': 'none', 'units': 3 * self._deter}
+    x = self.get('gru', Dense, **kw)(x)
+    reset, cand, update = tf.split(x, 3, -1)
+    reset = tf.nn.sigmoid(reset)
+    cand = tf.math.tanh(reset * cand)
+    update = tf.nn.sigmoid(update - 1)
+    deter = update * cand + (1 - update) * deter
+    return deter, deter
+
+  def _stats_layer(self, name, x):
+    if self._classes:
+      x = self.get(name, Dense, self._stoch * self._classes)(x)
+      logit = tf.reshape(x, x.shape[:-1] + [self._stoch, self._classes])
+      return {'logit': logit}
+    else:
+      x = self.get(name, Dense, 2 * self._stoch)(x)
+      mean, std = tf.split(x, 2, -1)
+      std = 2 * tf.nn.sigmoid(std / 2) + 0.1
+      return {'mean': mean, 'std': std}
+
+  def get_stoch(self, deter):
+    x = self.get('img_out', Dense, self._units, **self._kw)(deter)
+    stats = self._stats_layer('img_stats', x)
+    dist = self.get_dist(stats)
+    return self._cast(dist.mode())
+
+  def kl_loss(self, post, prior, balance=0.8):
+    post_const = tf.nest.map_structure(tf.stop_gradient, post)
+    prior_const = tf.nest.map_structure(tf.stop_gradient, prior)
+    lhs = tfd.kl_divergence(self.get_dist(post_const), self.get_dist(prior))
+    rhs = tfd.kl_divergence(self.get_dist(post), self.get_dist(prior_const))
+    return balance * lhs + (1 - balance) * rhs

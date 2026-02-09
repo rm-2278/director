@@ -27,7 +27,7 @@ def train_with_viz(agent, env, train_replay, eval_replay, logger, args):
   def per_episode(ep):
     metrics = {}
     length = len(ep['reward']) - 1
-    score = float(ep['reward'].astype(np.float64).sum())
+    score = float(np.array(ep['reward'], np.float64).sum())
     print(f'Episode has {length} steps and return {score:.1f}.')
     metrics['length'] = length
     metrics['score'] = score
@@ -50,7 +50,7 @@ def train_with_viz(agent, env, train_replay, eval_replay, logger, args):
         metrics[f'policy_{key}'] = ep[key]
         if 'log_goal' in ep:
           if ep['image'].shape == ep['log_goal'].shape:
-            goal = (255 * ep['log_goal']).astype(np.uint8)
+            goal = np.array(255 * ep['log_goal'], np.uint8)
             metrics[f'policy_{key}_with_goal'] = np.concatenate(
                 [ep['image'], goal], 2)
     logger.add(metrics, prefix='episode')

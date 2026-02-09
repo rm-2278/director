@@ -32,7 +32,7 @@ for base in (tf.Tensor, tf.Variable, values.PerReplica):
   base.logsumexp = tf.math.reduce_logsumexp
   base.transpose = tf.transpose
   base.reshape = tf.reshape
-  base.astype = tf.cast
+ # base.astype = tf.cast
   base.flatten = lambda x: tf.reshape(x, [-1])
 
 
@@ -141,8 +141,31 @@ class Module(tf.Module):
     if name not in self._modules:
       if 'name' in inspect.signature(ctor).parameters:
         kwargs['name'] = name
-      self._modules[name] = ctor(*args, **kwargs)
+      module = ctor(*args, **kwargs)
+      self._modules[name] = module
+      if isinstance(module, (tf.Module, tf.Variable)):
+        setattr(self, f'_module_{name}', module)
     return self._modules[name]
+  
+  @property
+  def variables(self):
+    vars = {id(v): v for v in super().variables}
+    modules = getattr(self, '_modules', {})
+    for module in modules.values():
+      if hasattr(module, 'variables'):
+        for v in tf.nest.flatten(module.variables):
+          vars[id(v)] = v
+    return list(vars.values())
+
+  @property
+  def trainable_variables(self):
+    vars = {id(v): v for v in super().trainable_variables}
+    modules = getattr(self, '_modules', {})
+    for module in modules.values():
+      if hasattr(module, 'trainable_variables'):
+        for v in tf.nest.flatten(module.trainable_variables):
+          vars[id(v)] = v
+    return list(vars.values())
 
 
 class Optimizer(Module):
@@ -161,7 +184,7 @@ class Optimizer(Module):
     self._lr = lr
     if warmup:
       self._lr = lambda: lr * tf.clip_by_value(
-          self._updates.astype(tf.float32) / warmup, 0.0, 1.0)
+          tf.cast(self._updates, tf.float32) / warmup, 0.0, 1.0)
     self._opt = {
         'adam': lambda: tf.optimizers.Adam(self._lr, epsilon=eps),
         'sgd': lambda: tf.optimizers.SGD(self._lr),
@@ -209,24 +232,26 @@ class Optimizer(Module):
       grads = context.all_reduce('mean', grads)
 
     if self._scaling:
-      grads = tf.nest.map_structure(lambda x: x / self._grad_scale, grads)
+      grads = tf.nest.map_structure(
+          lambda x: x / tf.cast(self._grad_scale, x.dtype), grads)
       overflow = ~tf.reduce_all([
           tf.math.is_finite(x).all() for x in tf.nest.flatten(grads)])
       metrics[f'{self._name}_grad_scale'] = self._grad_scale
-      metrics[f'{self._name}_grad_overflow'] = overflow.astype(tf.float32)
+      metrics[f'{self._name}_grad_overflow'] = tf.cast(overflow, tf.float32)
       keep = (~overflow & (self._fine_steps < 1000))
       incr = (~overflow & (self._fine_steps >= 1000))
       decr = overflow
-      self._fine_steps.assign(keep.astype(tf.int64) * (self._fine_steps + 1))
+      self._fine_steps.assign(tf.cast(keep, tf.int64) * (self._fine_steps + 1))
       self._grad_scale.assign(tf.clip_by_value(
-          keep.astype(tf.float32) * self._grad_scale +
-          incr.astype(tf.float32) * self._grad_scale * 2 +
-          decr.astype(tf.float32) * self._grad_scale / 2,
+          tf.cast(keep, tf.float32) * self._grad_scale +
+          tf.cast(incr, tf.float32) * self._grad_scale * 2 +
+          tf.cast(decr, tf.float32) * self._grad_scale / 2,
           1e-4, 1e4))
     else:
       overflow = False
 
     # Gradient clipping.
+    grads = [tf.cast(g, tf.float32) for g in grads]
     norm = tf.linalg.global_norm(grads)
     if self._clip:
       grads, _ = tf.clip_by_global_norm(grads, self._clip, norm)
@@ -345,8 +370,8 @@ class CosineDist(tfd.Distribution):
 class DirDist(tfd.MultivariateNormalDiag):
 
   def __init__(self, mean, std):
-    self.mean = tf.nn.l2_normalize(mean.astype(tf.float32), -1)
-    self.std = std.astype(tf.float32)
+    self.mean = tf.nn.l2_normalize(tf.cast(mean, tf.float32), -1)
+    self.std = tf.cast(std, tf.float32)
     super().__init__(self.mean, self.std)
 
   @classmethod
@@ -365,7 +390,7 @@ class DirDist(tfd.MultivariateNormalDiag):
     return sample
 
   def log_prob(self, value):
-    value = tf.nn.l2_normalize(value.astype(tf.float32), -1)
+    value = tf.nn.l2_normalize(tf.cast(value, tf.float32), -1)
     return super().log_prob(value)
 
 
@@ -408,7 +433,7 @@ class OneHotDist(tfd.OneHotCategorical):
   def sample(self, sample_shape=(), seed=None):
     if not isinstance(sample_shape, (list, tuple)):
       sample_shape = (sample_shape,)
-    logits = self.logits_parameter().astype(self.dtype)
+    logits = tf.cast(self.logits_parameter(), self.dtype)
     shape = tuple(logits.shape)
     logits = logits.reshape([np.prod(shape[:-1]), shape[-1]])
     indices = tf.random.categorical(logits, np.prod(sample_shape), seed=None)
@@ -436,9 +461,9 @@ def balance_stats(dist, target, thres):
   # Values are NaN when there are no positives or negatives in the current
   # batch, which means they will be ignored when aggregating metrics via
   # np.nanmean() later, as they should.
-  pos = (target.astype(tf.float32) > thres).astype(tf.float32)
-  neg = (target.astype(tf.float32) <= thres).astype(tf.float32)
-  pred = (dist.mean().astype(tf.float32) > thres).astype(tf.float32)
+  pos = tf.cast(tf.cast(target, tf.float32) > thres, tf.float32)
+  neg = tf.cast(tf.cast(target, tf.float32) <= thres, tf.float32)
+  pred = tf.cast(tf.cast(dist.mean(), tf.float32) > thres, tf.float32)
   loss = -dist.log_prob(target)
   return dict(
       pos_loss=(loss * pos).sum() / pos.sum(),
@@ -446,8 +471,8 @@ def balance_stats(dist, target, thres):
       pos_acc=(pred * pos).sum() / pos.sum(),
       neg_acc=((1 - pred) * neg).sum() / neg.sum(),
       rate=pos.mean(),
-      avg=target.astype(tf.float32).mean(),
-      pred=dist.mean().astype(tf.float32).mean(),
+      avg=tf.cast(target, tf.float32).mean(),
+      pred=tf.cast(dist.mean(), tf.float32).mean(),
   )
 
 
@@ -504,9 +529,9 @@ class AutoAdapt(Module):
         below, above = above, below
       inside = ~below & ~above
       adjusted = (
-          above.astype(tf.float32) * self._scale * (1 + self._vel) +
-          below.astype(tf.float32) * self._scale / (1 + self._vel) +
-          inside.astype(tf.float32) * self._scale)
+          tf.cast(above, tf.float32) * self._scale * (1 + self._vel) +
+          tf.cast(below, tf.float32) * self._scale / (1 + self._vel) +
+          tf.cast(inside, tf.float32) * self._scale)
       self._scale.assign(tf.clip_by_value(adjusted, self._min, self._max))
     elif self._impl == 'prop':
       direction = avg - self._target
@@ -536,14 +561,13 @@ class Normalize:
     return self.transform(values)
 
   def update(self, values):
-    x = values.astype(tf.float64)
-    m = self._decay
+    x = tf.cast(values, tf.float64)
     self._step.assign_add(1)
-    self._mean.assign(m * self._mean + (1 - m) * x.mean())
-    self._sqrs.assign(m * self._sqrs + (1 - m) * (x ** 2).mean())
+    self._mean.assign(self._decay * self._mean + (1 - self._decay) * x.mean())
+    self._sqrs.assign(self._decay * self._sqrs + (1 - self._decay) * (x ** 2).mean())
 
   def transform(self, values):
-    correction = 1 - self._decay ** self._step.astype(tf.float64)
+    correction = 1 - self._decay ** tf.cast(self._step, tf.float64)
     mean = self._mean / correction
     var = (self._sqrs / correction) - mean ** 2
     if self._max > 0.0:
@@ -554,10 +578,10 @@ class Normalize:
     if self._impl == 'off':
       pass
     elif self._impl == 'mean_std':
-      values -= mean.astype(values.dtype)
-      values *= scale.astype(values.dtype)
+      values -= tf.cast(mean, values.dtype)
+      values *= tf.cast(scale, values.dtype)
     elif self._impl == 'std':
-      values *= scale.astype(values.dtype)
+      values *= tf.cast(scale, values.dtype)
     else:
       raise NotImplementedError(self._impl)
     return values

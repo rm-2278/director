@@ -50,7 +50,7 @@ defaults:
 
   # World Model
   grad_heads: [decoder, reward, cont]
-  rssm: {units: 1024, deter: 1024, stoch: 32, classes: 32, act: elu, norm: layer, initial: learned2, unroll: True, context: 0, context_gate_bias: -2.0}
+  rssm: {deter: 1024, stoch: 32, classes: 32, units: 1024, act: elu, norm: layer, initial: learned2, unroll: True}
   encoder: {mlp_keys: '.*', cnn_keys: '.*', act: elu, norm: layer, mlp_layers: 4, mlp_units: 512, cnn: simple, cnn_depth: 64, cnn_kernels: [4, 4, 4, 4]}
   decoder: {mlp_keys: '.*', cnn_keys: '.*', act: elu, norm: layer, mlp_layers: 4, mlp_units: 512, cnn: simple, cnn_depth: 64, cnn_kernels: [5, 5, 6, 6], image_dist: mse, inputs: [deter, stoch]}
   reward_head: {layers: 4, units: 512, act: elu, norm: layer, dist: symlog, outscale: 0.1, inputs: [deter, stoch]}
@@ -59,6 +59,8 @@ defaults:
   model_opt: {opt: adam, lr: 1e-4, eps: 1e-6, clip: 100.0, wd: 1e-2, wd_pattern: 'kernel'}
   wmkl: {impl: mult, scale: 0.1, target: 3.5, min: 1e-5, max: 1.0, vel: 0.1}
   wmkl_balance: 0.8
+  rssm_type: rssm
+  rssm_context: {context: 16, ctxt_rnn_type: SimpleGateL0RD}
 
   # Actor Critic
   actor: {layers: 4, units: 512, act: elu, norm: layer, minstd: 0.03, maxstd: 1.0, outscale: 0.1, unimix: 0.01, inputs: [deter, stoch]}
@@ -209,7 +211,7 @@ debug:
   replay_chunk: 12
   encoder.cnn_depth: 16
   decoder.cnn_depth: 16
-  rssm: {units: 64, stoch: 8, classes: 8}
+  rssm: {stoch: 8, classes: 8}
   .*\.layers: 2
   .*\.units: 64
   .*\.wd: 0.0

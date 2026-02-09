@@ -69,6 +69,11 @@ def load_single_env(
     assert repeat == 1
     assert size == (64, 64)
     env = pinpad.PinPad(task, length or 2000)
+  elif suite == 'pinpaddense':
+    from . import pinpaddense
+    assert repeat == 1
+    assert size == (64, 64)
+    env = pinpaddense.PinPadDense(task, length or 2000)
   else:
     raise NotImplementedError(suite)
   for name, space in env.act_space.items():

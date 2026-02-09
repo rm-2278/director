@@ -122,15 +122,15 @@ class Agent(tfagent.TFAgent):
       if key.startswith('log_') or key in ('key',):
         continue
       if len(value.shape) > 3 and value.dtype == tf.uint8:
-        value = value.astype(dtype) / 255.0
+        value = tf.cast(value, dtype) / 255.0
       else:
-        value = value.astype(tf.float32)
+        value = tf.cast(value, tf.float32)
       obs[key] = value
     obs['reward'] = {
         'off': tf.identity, 'sign': tf.sign,
         'tanh': tf.tanh, 'symlog': tfutils.symlog,
     }[self.config.transform_rewards](obs['reward'])
-    obs['cont'] = 1.0 - obs['is_terminal'].astype(tf.float32)
+    obs['cont'] = 1.0 - tf.cast(obs['is_terminal'], tf.float32)
     return obs
 
 
@@ -140,7 +140,10 @@ class WorldModel(tfutils.Module):
     shapes = {k: tuple(v.shape) for k, v in obs_space.items()}
     shapes = {k: v for k, v in shapes.items() if not k.startswith('log_')}
     self.config = config
-    self.rssm = nets.RSSM(**config.rssm)
+    if config.rssm_type == 'context':
+      self.rssm = nets.ContextRSSM(**config.rssm, **config.rssm_context)
+    else:
+      self.rssm = nets.RSSM(**config.rssm)
     self.encoder = nets.MultiEncoder(shapes, **config.encoder)
     self.heads = {}
     self.heads['decoder'] = nets.MultiDecoder(shapes, **config.decoder)
@@ -175,7 +178,7 @@ class WorldModel(tfutils.Module):
     losses['kl'] = kl
     metrics.update({f'wmkl_{k}': v for k, v in mets.items()})
     for key, dist in dists.items():
-      losses[key] = -dist.log_prob(data[key].astype(tf.float32))
+      losses[key] = -dist.log_prob(tf.cast(data[key], tf.float32))
     if 'context_gate' in post:
       gate = post['context_gate']
       losses['context_gate'] = tf.reduce_mean(gate, -1)
@@ -214,7 +217,7 @@ class WorldModel(tfutils.Module):
     return model_loss.mean(), last_state, out, metrics
 
   def imagine(self, policy, start, horizon):
-    first_cont = (1.0 - start['is_terminal']).astype(tf.float32)
+    first_cont = tf.cast(1.0 - start['is_terminal'], tf.float32)
     keys = list(self.rssm.initial(1).keys())
     start = {k: v for k, v in start.items() if k in keys}
     start['action'] = policy(start)
@@ -234,7 +237,7 @@ class WorldModel(tfutils.Module):
     return traj
 
   def imagine_carry(self, policy, start, horizon, carry):
-    first_cont = (1.0 - start['is_terminal']).astype(tf.float32)
+    first_cont = tf.cast(1.0 - start['is_terminal'], tf.float32)
     keys = list(self.rssm.initial(1).keys())
     start = {k: v for k, v in start.items() if k in keys}
     keys += list(carry.keys()) + ['action']
@@ -274,7 +277,7 @@ class WorldModel(tfutils.Module):
     openl = self.heads['decoder'](
         self.rssm.imagine(data['action'][:6, 5:], start))
     for key in self.heads['decoder'].cnn_shapes.keys():
-      truth = data[key][:6].astype(tf.float32)
+      truth = tf.cast(data[key][:6], tf.float32)
       model = tf.concat([recon[key].mode()[:, :5], openl[key].mode()], 1)
       error = (model - truth + 1) / 2
       video = tf.concat([truth, model, error], 2)

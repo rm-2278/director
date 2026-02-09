@@ -32,7 +32,7 @@ class Disag(tfutils.Module):
         [data['action'][:, 1:], 0 * data['action'][:, :1]], 1)}
     self._build(data)
     inputs = self.inputs(data)[:, :-1]
-    target = self.target(data)[:, 1:].astype(tf.float32)
+    target = tf.cast(self.target(data)[:, 1:], tf.float32)
     with tf.GradientTape() as tape:
       preds = [head(inputs) for head in self.nets]
       loss = -sum([pred.log_prob(target).mean() for pred in preds])
@@ -65,7 +65,7 @@ class LatentVAE(tfutils.Module):
 
   def __call__(self, traj):
     dist = self.enc(traj)
-    target = tf.stop_gradient(traj['deter'].astype(tf.float32))
+    target = tf.stop_gradient(tf.cast(traj['deter'], tf.float32))
     ll = self.dec(self.flatten(dist.sample())).log_prob(target)
     if self.config.expl_vae_elbo:
       kl = tfd.kl_divergence(dist, self.prior)
@@ -76,7 +76,7 @@ class LatentVAE(tfutils.Module):
 
   def train(self, data):
     metrics = {}
-    target = tf.stop_gradient(data['deter'].astype(tf.float32))
+    target = tf.stop_gradient(tf.cast(data['deter'], tf.float32))
     with tf.GradientTape() as tape:
       dist = self.enc(data)
       kl = tfd.kl_divergence(dist, self.prior)
@@ -127,7 +127,7 @@ class PBE(tfutils.Module):
         flat[:, None, :].reshape((len(flat), 1, -1)) -
         flat[None, :, :].reshape((1, len(flat), -1)), axis=-1)
     rew = -tf.math.top_k(-dists, self.config.pbe_knn, sorted=True)[0].mean(-1)
-    return rew.reshape(feat.shape[:-1]).astype(tf.float32)
+    return tf.cast(rew.reshape(feat.shape[:-1]), tf.float32)
 
   def train(self, data):
     return {}
