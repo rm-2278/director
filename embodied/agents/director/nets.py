@@ -558,8 +558,8 @@ def get_act(name):
 
 class SimpleGateL0RDCell(tfutils.Module):
 
-  # Valid kwargs for tfkl.Dense (exclude custom Dense kwargs like act/norm).
-  _INVALID_DENSE_KW = {'units', 'act', 'norm', 'bias'}
+  # Custom kwargs from the Dense layer API that should not be passed to tfkl.Dense.
+  _FILTERED_KWARGS = {'units', 'act', 'norm', 'bias'}
 
   def __init__(
       self, size, act='tanh', sample_sd=0.05, out_size=-1, always_sample=False,
@@ -574,7 +574,7 @@ class SimpleGateL0RDCell(tfutils.Module):
     # Filter out kwargs that are not valid for tfkl.Dense
     self._kwargs = {
         k: v for k, v in kwargs.items()
-        if k not in self._INVALID_DENSE_KW}
+        if k not in self._FILTERED_KWARGS}
 
   @property
   def state_size(self):
@@ -642,8 +642,6 @@ class ContextRSSM(tfutils.Module):
         out_size=ctxt_rnn_out_size,
         always_sample=ctxt_always_sample,
         headless=True,
-        act=act, norm=norm,
-        **kw
       )
     else:
       raise NotImplementedError(ctxt_rnn_type)
@@ -816,16 +814,17 @@ class ContextRSSM(tfutils.Module):
     dist = self.get_dist(stats)
     return self._cast(dist.mode())
 
+  def _balanced_kl(self, post, prior, post_const, prior_const, balance, prefix=''):
+    lhs = tfd.kl_divergence(
+        self.get_dist(post_const, prefix), self.get_dist(prior, prefix))
+    rhs = tfd.kl_divergence(
+        self.get_dist(post, prefix), self.get_dist(prior_const, prefix))
+    return balance * lhs + (1 - balance) * rhs
+
   def kl_loss(self, post, prior, balance=0.8):
     post_const = tf.nest.map_structure(tf.stop_gradient, post)
     prior_const = tf.nest.map_structure(tf.stop_gradient, prior)
-    lhs = tfd.kl_divergence(self.get_dist(post_const), self.get_dist(prior))
-    rhs = tfd.kl_divergence(self.get_dist(post), self.get_dist(prior_const))
-    kl = balance * lhs + (1 - balance) * rhs
-    # Context-specific KL
-    ctxt_lhs = tfd.kl_divergence(
-        self.get_dist(post_const, 'ctxt_'), self.get_dist(prior, 'ctxt_'))
-    ctxt_rhs = tfd.kl_divergence(
-        self.get_dist(post, 'ctxt_'), self.get_dist(prior_const, 'ctxt_'))
-    ctxt_kl = balance * ctxt_lhs + (1 - balance) * ctxt_rhs
+    kl = self._balanced_kl(post, prior, post_const, prior_const, balance)
+    ctxt_kl = self._balanced_kl(
+        post, prior, post_const, prior_const, balance, prefix='ctxt_')
     return kl + ctxt_kl
