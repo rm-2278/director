@@ -211,7 +211,7 @@ debug:
   replay_chunk: 12
   encoder.cnn_depth: 16
   decoder.cnn_depth: 16
-  rssm: {stoch: 8, classes: 8}
+  rssm: {stoch: 8, classes: 8, units: 64}
   .*\.layers: 2
   .*\.units: 64
   .*\.wd: 0.0
